@@ -1,62 +1,49 @@
 import os
 import json
 import random
+from pyglet.graphics import Batch
 import arcade
+from arcade.gui import UIManager, UIFlatButton
+from arcade.gui.widgets.layout import UIAnchorLayout, UIBoxLayout
+from arcade import load_texture, SpriteSolidColor
+from arcade.gui.widgets.buttons import UIFlatButton
+
+
 
 WINDOW_WIDTH = 720
 WINDOW_HEIGHT = 720
-WINDOW_TITLE = "2048 Adaptive Grid"
+FIELD_SCALE = 0.8
+CELL_PADDING = 6
 
-FIELD_SCALE = 0.8  # 80% окна занимает поле
-GRID_SIZE = 4      # менять на 4,5,6 и т.д.
-CELL_PADDING = 6   # отступ между клетками (в пикселях)
-
-# Цвета (RGB)
 BACKGROUND_COLOR = (187, 173, 160)
+MENU_COLOR = (205, 173, 160)
 TILE_COLORS = {
-    0: (205, 193, 180),
-    2: (238, 228, 218),
-    4: (237, 224, 200),
-    8: (242, 177, 121),
-    16: (245, 149, 99),
-    32: (246, 124, 95),
-    64: (246, 94, 59),
-    128: (237, 207, 114),
-    256: (237, 204, 97),
-    512: (237, 200, 80),
-    1024: (237, 197, 63),
-    2048: (237, 194, 46),
+    0: (205, 193, 180), 2: (238, 228, 218), 4: (237, 224, 200),
+    8: (242, 177, 121), 16: (245, 149, 99), 32: (246, 124, 95),
+    64: (246, 94, 59), 128: (237, 207, 114), 256: (237, 204, 97),
+    512: (237, 200, 80), 1024: (237, 197, 63), 2048: (237, 194, 46)
 }
-
-BOX_COLOR = (119, 110, 101)  # цвет для Score и BestScore
+BOX_COLOR = (119, 110, 101)
 TEXT_COLOR_LIGHT = arcade.color.WHITE
 TEXT_COLOR_DARK = arcade.color.BLACK
 
-print(os.path.expanduser("~"))
 BEST_SCORE_FILE = os.path.join(os.path.expanduser("~"), ".2048_best_score.json")
 
 
-class Game2048(arcade.Window):
-    def __init__(self):
-        super().__init__(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
-        arcade.set_background_color(BACKGROUND_COLOR)
-
-        # Параметры поля и клетки
+class Game2048(arcade.View):
+    def __init__(self, grid_size=4):
+        super().__init__()
+        self.grid_size = grid_size
         self.field_pixel_size = int(min(WINDOW_WIDTH, WINDOW_HEIGHT) * FIELD_SCALE)
-        self.cell_size = self.field_pixel_size / GRID_SIZE
+        self.cell_size = self.field_pixel_size / grid_size
         self.field_offset_x = (WINDOW_WIDTH - self.field_pixel_size) / 2
         self.field_offset_y = (WINDOW_HEIGHT - self.field_pixel_size) / 2
 
-        # Игровая сетка (список списков)
-        self.grid = self.create_empty_grid(GRID_SIZE)
-
-        # Счёт
+        self.grid = self.create_empty_grid(grid_size)
         self.score = 0
         self.best_score = self.load_best_score()
         self.game_over = False
         self.win = False
-
-        # Поместить две стартовые плитки "2"
         self.spawn_initial_tiles(2)
 
     def load_best_score(self):
@@ -65,7 +52,7 @@ class Game2048(arcade.Window):
                 data = json.load(f)
                 return int(data.get("best_score", 0))
         except Exception:
-            return 0
+            pass
 
     def save_best_score(self):
         try:
@@ -75,152 +62,120 @@ class Game2048(arcade.Window):
             pass
 
     def create_empty_grid(self, n):
-        """Создать n x n сетку заполненную нулями."""
-        return [[0 for _ in range(n)] for _ in range(n)]
+        return [[0] * n for _ in range(n)]
 
     def spawn_initial_tiles(self, count=2):
-        """Заполнить count случайных пустых ячеек значением 2."""
-        n = GRID_SIZE * GRID_SIZE
+        n = self.grid_size ** 2
         count = min(count, n)
-        indices = random.sample(range(n), k=count)
+        indices = random.sample(range(n), count)
         for idx in indices:
-            row = idx // GRID_SIZE
-            col = idx % GRID_SIZE
+            row, col = divmod(idx, self.grid_size)
             self.grid[row][col] = 2
 
     def spawn_one_tile(self):
-        empty = [(r, c) for r in range(GRID_SIZE) for c in range(GRID_SIZE) if self.grid[r][c] == 0]
-        if not empty:
-            return
-        r, c = random.choice(empty)
-        self.grid[r][c] = 4 if random.random() < 0.1 else 2
+        empty = [(r, c) for r in range(self.grid_size) for c in range(self.grid_size) if self.grid[r][c] == 0]
+        if empty:
+            r, c = random.choice(empty)
+            self.grid[r][c] = 4 if random.random() < 0.1 else 2
 
-    # ----------------------
-    # Логика сжатия + слияния
-    # ----------------------
     @staticmethod
     def compress_list_left(line):
-        """Вернуть список, где все ненулевые элементы сжаты влево в том же порядке, остальные - нули."""
-        nonzeros = [x for x in line if x != 0]
+        nonzeros = [x for x in line if x]
         return nonzeros + [0] * (len(line) - len(nonzeros))
 
     @staticmethod
     def merge_list_left(line):
-        """Выполнить сжатие и слияние по правилам 2048 слева направо.
-
-        Возвращает (new_line, score_gained).
-        """
-        nonzeros = [x for x in line if x != 0]
-        merged = []
-        score_gained = 0
+        nonzeros = [x for x in line if x]
+        merged, score = [], 0
         i = 0
         while i < len(nonzeros):
             if i + 1 < len(nonzeros) and nonzeros[i] == nonzeros[i + 1]:
-                new_val = nonzeros[i] * 2
-                merged.append(new_val)
-                score_gained += new_val
+                val = nonzeros[i] * 2
+                merged.append(val)
+                score += val
                 i += 2
             else:
                 merged.append(nonzeros[i])
                 i += 1
-        merged += [0] * (len(line) - len(merged))
-        return merged, score_gained
+        return merged + [0] * (len(line) - len(merged)), score
 
     def move_left(self):
         changed = False
-        gained_total = 0
-        for r in range(GRID_SIZE):
-            old = list(self.grid[r])
+        score_gained = 0
+        for r in range(self.grid_size):
+            old = self.grid[r][:]
             new, gained = self.merge_list_left(old)
             if new != old:
                 changed = True
                 self.grid[r] = new
-                gained_total += gained
-        if gained_total:
-            self.score += gained_total
+                score_gained += gained
+        self.score += score_gained
         return changed
 
     def move_right(self):
         changed = False
-        gained_total = 0
-        for r in range(GRID_SIZE):
-            old = list(self.grid[r])
-            rev = list(reversed(old))
-            new_rev, gained = self.merge_list_left(rev)
-            new = list(reversed(new_rev))
+        score_gained = 0
+        for r in range(self.grid_size):
+            old = self.grid[r][:]
+            rev_old = old[::-1]
+            new_rev, gained = self.merge_list_left(rev_old)
+            new = new_rev[::-1]
             if new != old:
                 changed = True
                 self.grid[r] = new
-                gained_total += gained
-        if gained_total:
-            self.score += gained_total
+                score_gained += gained
+        self.score += score_gained
         return changed
 
     def move_up(self):
-        """
-        Переместить плитки вверх (в сторону увеличения индекса row).
-        grid хранится как list of rows, row=0 — нижняя строка.
-        """
         changed = False
-        gained_total = 0
-        for c in range(GRID_SIZE):
-            col = [self.grid[r][c] for r in range(GRID_SIZE)]  # bottom -> top
-            rev = list(reversed(col))  # top -> bottom
-            new_rev, gained = self.merge_list_left(rev)  # сжать/слить к "верху"
-            new_col = list(reversed(new_rev))  # вернуть порядок bottom -> top
+        score_gained = 0
+        for c in range(self.grid_size):
+            col = [self.grid[r][c] for r in range(self.grid_size)]
+            rev_col = col[::-1]
+            new_rev, gained = self.merge_list_left(rev_col)
+            new_col = new_rev[::-1]
             if new_col != col:
                 changed = True
-                for r in range(GRID_SIZE):
+                for r in range(self.grid_size):
                     self.grid[r][c] = new_col[r]
-                gained_total += gained
-        if gained_total:
-            self.score += gained_total
+                score_gained += gained
+        self.score += score_gained
         return changed
 
     def move_down(self):
-        """
-        Переместить плитки вниз (в сторону уменьшения индекса row).
-        """
         changed = False
-        gained_total = 0
-        for c in range(GRID_SIZE):
-            col = [self.grid[r][c] for r in range(GRID_SIZE)]  # bottom -> top
-            new_col, gained = self.merge_list_left(col)  # сжать/слить к низу (bottom)
+        score_gained = 0
+        for c in range(self.grid_size):
+            col = [self.grid[r][c] for r in range(self.grid_size)]
+            new_col, gained = self.merge_list_left(col)
             if new_col != col:
                 changed = True
-                for r in range(GRID_SIZE):
+                for r in range(self.grid_size):
                     self.grid[r][c] = new_col[r]
-                gained_total += gained
-        if gained_total:
-            self.score += gained_total
+                score_gained += gained
+        self.score += score_gained
         return changed
 
-    # ----------------------
     def has_moves_possible(self):
-        """Проверить, есть ли ход (пустые ячейки или возможные слияния)."""
-        for r in range(GRID_SIZE):
-            for c in range(GRID_SIZE):
+        for r in range(self.grid_size):
+            for c in range(self.grid_size):
                 if self.grid[r][c] == 0:
                     return True
-                if c + 1 < GRID_SIZE and self.grid[r][c] == self.grid[r][c + 1]:
+                if c + 1 < self.grid_size and self.grid[r][c] == self.grid[r][c + 1]:
                     return True
-                if r + 1 < GRID_SIZE and self.grid[r][c] == self.grid[r + 1][c]:
+                if r + 1 < self.grid_size and self.grid[r][c] == self.grid[r + 1][c]:
                     return True
         return False
 
     def check_game_end(self):
-        """Проверить условия окончания игры: победа (2048) или отсутствие ходов (поражение)."""
-        # Победа: есть плитка 2048
         for row in self.grid:
-            for v in row:
-                if v == 2048:
-                    self.win = True
-                    # Сохраняем результат, если он лучше, либо если файла best_score ещё нет
-                    if self.score > self.best_score or not os.path.exists(BEST_SCORE_FILE):
-                        self.best_score = self.score
-                        self.save_best_score()
-                    return
-        # Поражение: нет возможных ходов
+            if 2048 in row:
+                self.win = True
+                if self.score > self.best_score or not os.path.exists(BEST_SCORE_FILE):
+                    self.best_score = self.score
+                    self.save_best_score()
+                return
         if not self.has_moves_possible():
             self.game_over = True
             if self.score > self.best_score or not os.path.exists(BEST_SCORE_FILE):
@@ -228,25 +183,15 @@ class Game2048(arcade.Window):
                 self.save_best_score()
 
     def reset_game(self):
-        """Сбросить игровое состояние для новой игры (сохранение Best не трогаем)."""
-        self.grid = self.create_empty_grid(GRID_SIZE)
+        self.grid = self.create_empty_grid(self.grid_size)
         self.score = 0
-        self.game_over = False
-        self.win = False
+        self.game_over = self.win = False
         self.spawn_initial_tiles(2)
 
-    # ----------------------
-    # Обработчик клавиш
-    # ----------------------
     def on_key_press(self, key, modifiers):
-        """Обрабатываем стрелки — перемещаем плитки к краю в направлении.
-        R — рестарт игры."""
-        # Рестарт игры по R
         if key == arcade.key.R:
             self.reset_game()
             return
-
-        # Если игра закончена — игнорируем клавиши (кроме R)
         if self.game_over or self.win:
             return
 
@@ -260,7 +205,6 @@ class Game2048(arcade.Window):
         elif key == arcade.key.DOWN:
             moved = self.move_down()
 
-        # Если поле изменилось — спавним новую плитку и обновляем best_score
         if moved:
             # Спавним одну плитку
             self.spawn_one_tile()
@@ -279,15 +223,16 @@ class Game2048(arcade.Window):
                 print(row)
             print(f"Score: {self.score}  Best: {self.best_score}")
 
-    # ----------------------
-    # Рендер
-    # ----------------------
+        if key == arcade.key.ESCAPE:
+            menu_view = MenuView()
+            self.window.show_view(menu_view)
+
     def on_draw(self):
         self.clear()
+        arcade.draw_lrbt_rectangle_filled(0, WINDOW_WIDTH, 0, WINDOW_HEIGHT, BACKGROUND_COLOR)
         self.draw_board()
         self.draw_score_boxes()
 
-        # Оверлей при окончании игры
         if self.win or self.game_over:
             # затемняющий полупрозрачный слой
             arcade.draw_rect_filled(arcade.rect.XYWH(0, WINDOW_WIDTH, WINDOW_HEIGHT, 0), (0, 0, 0, 150))
@@ -300,26 +245,24 @@ class Game2048(arcade.Window):
             arcade.draw_text(msg, center_x, center_y, TEXT_COLOR_LIGHT, 24, anchor_x="center", anchor_y="center")
 
     def draw_board(self):
-        """Отрисовать все клетки и плитки с числами."""
-        half = self.cell_size / 2
-        tile_w = self.cell_size - CELL_PADDING
-        tile_h = self.cell_size - CELL_PADDING
+        tile_size = self.cell_size - CELL_PADDING
+        half_tile = tile_size / 2
 
-        for row in range(GRID_SIZE):
-            for col in range(GRID_SIZE):
+        for r in range(self.grid_size):
+            for c in range(self.grid_size):
                 # Центр клетки
-                x = self.field_offset_x + col * self.cell_size + half
-                y = self.field_offset_y + row * self.cell_size + half
-
-                value = self.grid[row][col]
+                x = self.field_offset_x + c * self.cell_size + self.cell_size / 2
+                y = self.field_offset_y + r * self.cell_size + self.cell_size / 2
+                value = self.grid[r][c]
                 color = TILE_COLORS.get(value, TILE_COLORS[2048])
-                arcade.draw_rect_filled(arcade.rect.XYWH(x, y, tile_w, tile_h), color)
 
-                if value != 0:
-                    font_size = max(12, int(self.cell_size * 0.45))
-                    # Текст цвет зависит от величины
+                arcade.draw_lbwh_rectangle_filled(x - half_tile, y - half_tile, tile_size, tile_size, color)
+
+                if value:
+                    font_size = max(24, int(self.cell_size * 0.45))
                     text_color = TEXT_COLOR_DARK if value <= 4 else TEXT_COLOR_LIGHT
-                    arcade.draw_text(str(value), x, y, text_color, font_size, anchor_x="center", anchor_y="center")
+                    arcade.draw_text(str(value), x, y, text_color, font_size,
+                                     anchor_x="center", anchor_y="center")
 
     def draw_score_boxes(self):
         # Нарисовать два бокса Score и BestScore под полем (слева)
@@ -330,16 +273,255 @@ class Game2048(arcade.Window):
 
         # Score
         arcade.draw_rect_filled(arcade.rect.XYWH(left_x, bottom_y + box_h / 2, box_w, box_h), BOX_COLOR)
-        arcade.draw_text(f"Score: {self.score}", left_x, bottom_y + box_h / 2, TEXT_COLOR_LIGHT, 20, anchor_x="center", anchor_y="center")
+        arcade.draw_text(f"Score: {self.score}", left_x, bottom_y + box_h / 2, TEXT_COLOR_LIGHT, 20, anchor_x="center",
+                         anchor_y="center")
 
         # Best
         arcade.draw_rect_filled(arcade.rect.XYWH(left_x + box_w + 10, bottom_y + box_h / 2, box_w, box_h), BOX_COLOR)
-        arcade.draw_text(f"Best: {self.best_score}", left_x + box_w + 10, bottom_y + box_h / 2, TEXT_COLOR_LIGHT, 20, anchor_x="center", anchor_y="center")
-
-def main():
-    Game2048()
-    arcade.run()
+        arcade.draw_text(f"Best: {self.best_score}", left_x + box_w + 10, bottom_y + box_h / 2, TEXT_COLOR_LIGHT, 20,
+                         anchor_x="center", anchor_y="center")
 
 
-if __name__ == "__main__":
-    main()
+class MenuView(arcade.View):
+    def __init__(self):
+        super().__init__()
+        self.background_color = (205, 193, 180)
+        self.manager = UIManager()
+        self.comic_font = "Comic Sans MS"
+        self.anchor_layout = UIAnchorLayout()
+        self.manager.add(self.anchor_layout)
+
+        self.setup_widgets()
+        self.setup_title()
+
+    def setup_title(self):
+        title_color = (14, 33, 75)
+        self.main_text = arcade.Text(
+            "2048", self.window.width / 2, self.window.height - 120,
+            title_color, 60, font_name=self.comic_font, anchor_x="center", bold=True
+        )
+        self.space_text = arcade.Text(
+            "Выбери поле, чтобы начать!", self.window.width / 2, self.window.height - 180,
+            title_color, 30, font_name=self.comic_font, anchor_x="center"
+        )
+
+    def draw_text_outline(self, text, x, y, color, font_size, outline_color=arcade.color.WHITE, outline_width=3):
+        for dx in range(-outline_width, outline_width + 1):
+            for dy in range(-outline_width, outline_width + 1):
+                if dx != 0 or dy != 0:
+                    arcade.draw_text(text, x + dx, y + dy + 30, outline_color, font_size, font_name=self.comic_font, anchor_x="center", anchor_y="center")
+        arcade.draw_text(text, x, y + 30, color, font_size, font_name=self.comic_font, anchor_x="center", anchor_y="center")
+
+    def setup_widgets(self):
+        self.flat_button_4 = UIFlatButton(text="4x4", width=320, height=75, text_color=arcade.color.WHITE, bg_color=arcade.color.BLUE)
+        self.anchor_layout.add(
+            self.flat_button_4,
+            anchor_x="center_x",  # Якорь по X: левый край, центр или правый
+            align_x=0,  # Смещение по X в пикселях от якоря
+            anchor_y="top",  # Якорь по Y: bottom, center_y или top
+            align_y=-250  # Смещение по Y в пикселях от якоря (отрицательное — вниз)
+        )
+        self.flat_button_4.on_click = lambda e, s=4: self.window.show_view(Game2048(s))
+
+        self.flat_button_5 = UIFlatButton(text="5x5", width=320, height=75, color=arcade.color.BLUE)
+        self.flat_button_5.on_click = lambda e, s=5: self.window.show_view(Game2048(s))
+        self.anchor_layout.add(
+            self.flat_button_5,
+            anchor_x="center_x",  # Якорь по X: левый край, центр или правый
+            align_x=0,  # Смещение по X в пикселях от якоря
+            anchor_y="top",  # Якорь по Y: bottom, center_y или top
+            align_y=-350  # Смещение по Y в пикселях от якоря (отрицательное — вниз)
+        )
+
+        self.flat_button_7 = UIFlatButton(text="7x7", width=320, height=75, color=arcade.color.BLUE)
+        self.flat_button_7.on_click = lambda e, s=7: self.window.show_view(Game2048(s))
+        self.anchor_layout.add(
+            self.flat_button_7,
+            anchor_x="center_x",  # Якорь по X: левый край, центр или правый
+            align_x=0,  # Смещение по X в пикселях от якоря
+            anchor_y="top",  # Якорь по Y: bottom, center_y или top
+            align_y=-450  # Смещение по Y в пикселях от якоря (отрицательное — вниз)
+        )
+
+        self.flat_button_lider = UIFlatButton(text='Лидеры', width=150, height=60, font='Comic Sans MS',
+                                              color=arcade.color.BLUE)
+        self.anchor_layout.add(
+            self.flat_button_lider,
+            anchor_x="center_x",  # Якорь по X: левый край, центр или правый
+            align_x=-175,  # Смещение по X в пикселях от якоря
+            anchor_y="top",  # Якорь по Y: bottom, center_y или top
+            align_y=-600  # Смещение по Y в пикселях от якоря (отрицательное — вниз)
+        )
+
+
+        self.flat_button_rules = UIFlatButton(text="Правила", width=150, height=60, color=arcade.color.BLUE)
+        self.anchor_layout.add(
+            self.flat_button_rules,
+            anchor_x="center_x",  # Якорь по X: левый край, центр или правый
+            align_x=0,  # Смещение по X в пикселях от якоря
+            anchor_y="top",  # Якорь по Y: bottom, center_y или top
+            align_y=-600  # Смещение по Y в пикселях от якоря (отрицательное — вниз)
+        )
+        self.flat_button_rules.on_click = lambda event: self.window.show_view(Rules())
+
+        self.flat_button_odds = UIFlatButton(text="Шансы", width=150, height=60, color=arcade.color.BLUE)
+        self.anchor_layout.add(
+            self.flat_button_odds,
+            anchor_x="center_x",  # Якорь по X: левый край, центр или правый
+            align_x=175,  # Смещение по X в пикселях от якоря
+            anchor_y="top",  # Якорь по Y: bottom, center_y или top
+            align_y=-600  # Смещение по Y в пикселях от якоря (отрицательное — вниз)
+        )
+        self.flat_button_odds.on_click = lambda event: self.window.show_view(Chance())
+
+    def on_show_view(self):
+        self.manager.enable()
+
+    def on_hide_view(self):
+        self.manager.disable()
+
+    def on_draw(self):
+        self.clear()
+        self.manager.draw()
+
+        self.draw_text_outline(
+            "2048", self.window.width / 2, self.window.height - 120,
+            (14, 33, 75), 72, outline_color=arcade.color.WHITE, outline_width=4
+        )
+        self.draw_text_outline(
+            "Выбери поле, чтобы начать!", self.window.width / 2, self.window.height - 200,
+            (14, 33, 75), 22, outline_color=arcade.color.WHITE, outline_width=2
+        )
+
+
+class Rules(arcade.View):
+    def __init__(self):
+        super().__init__()
+        self.manager = UIManager()
+        self.comic_font = "Comic Sans MS"
+        self.anchor_layout = UIAnchorLayout()
+        self.manager.add(self.anchor_layout)
+        self.setup_widgets()
+
+    def setup_widgets(self):
+        back_btn = UIFlatButton(
+            text="Назад",
+            width=200,
+            height=60,
+            font_size=24,
+            font_name="Comic Sans MS",
+            color=(205, 193, 180),
+            text_color=(14, 33, 75)
+        )
+        back_btn.on_click = lambda event: self.window.show_view(MenuView())
+
+
+        self.anchor_layout.add(back_btn, anchor_x="center_x", anchor_y="center_y", align_x=200, align_y= -300)
+
+    def on_draw(self):
+        self.clear()
+        arcade.draw_lrbt_rectangle_filled(0, WINDOW_WIDTH, 0, WINDOW_HEIGHT, (205, 193, 180))
+
+        self.manager.draw()
+
+        arcade.draw_text("Правила игры 2048:", WINDOW_WIDTH / 2, WINDOW_HEIGHT - 75,
+                         (14, 33, 75), 32, anchor_x="center", font_name=self.comic_font)
+
+        y_pos = WINDOW_HEIGHT - 350
+        arcade.draw_text(
+            "• Игровое поле имеет форму квадрата 4×4 / 5x5 / 7x7.В начале игры появляются две плитки номинала «2» или «4».\n"
+            "•Нажатием стрелки игрок может скинуть все плитки игрового поля в одну из четырёх сторон.\n"
+            "•Если при сбрасывании две плитки одного номинала «налетают» одна на другую, то они превращаются в одну, номинал которой равен сумме соединившихся плиток.\n"
+            "•После каждого хода на свободной секции поля появляется новая плитка номиналом «2» или «4».\n"
+            "•Если при нажатии кнопки местоположение плиток или их номинал не изменится, то ход не совершается.\n"
+            "•Если в одной строчке или в одном столбце находится более двух плиток одного номинала, то при сбрасывании они начинают соединяться с той стороны, в которую были направлены.\n"
+            "•За каждое соединение игровые очки увеличиваются на номинал получившейся плитки.\n"
+            "•Игра заканчивается поражением, если после очередного хода невозможно совершить действие.",
+            WINDOW_WIDTH / 2, y_pos,
+            (14, 33, 75), 14,
+            anchor_x="center", anchor_y="center",
+            font_name=self.comic_font,
+            multiline=True,
+            width=600
+        )
+
+
+        arcade.draw_text("Нажмите ESC или кнопку 'Назад'", 230, 50,
+                         (14, 33, 75), 20, anchor_x="center", font_name=self.comic_font)
+
+
+
+    def on_show_view(self):
+        self.manager.enable()
+        arcade.set_background_color(205, 193, 180)
+
+    def on_hide_view(self):
+        self.manager.disable()
+
+    def on_key_press(self, key, modifiers):
+        if key == arcade.key.ESCAPE:
+            self.window.show_view(MenuView())
+
+
+class Chance(arcade.View):
+    def __init__(self):
+        super().__init__()
+        self.manager = UIManager()
+        self.comic_font = "Comic Sans MS"
+        self.anchor_layout = UIAnchorLayout()
+        self.manager.add(self.anchor_layout)
+        self.setup_widgets()
+
+    def setup_widgets(self):
+        back_btn = UIFlatButton(
+            text="Назад",
+            width=200,
+            height=60,
+            font_size=24,
+            font_name="Comic Sans MS",
+            color=(205, 193, 180),
+            text_color=(14, 33, 75)
+        )
+        back_btn.on_click = lambda event: self.window.show_view(MenuView())
+
+
+        self.anchor_layout.add(back_btn, anchor_x="center_x", anchor_y="center_y", align_x=200, align_y= -300)
+
+    def on_draw(self):
+        self.clear()
+        arcade.draw_lrbt_rectangle_filled(0, WINDOW_WIDTH, 0, WINDOW_HEIGHT, (205, 193, 180))
+
+        self.manager.draw()
+
+        # Заголовок
+        arcade.draw_text("Шансы появления плиток:", WINDOW_WIDTH / 2, WINDOW_HEIGHT - 100,
+                         (14, 33, 75), 32, anchor_x="center", font_name=self.comic_font)
+
+        # Информация о шансах
+        y_pos = WINDOW_HEIGHT / 2 + 50
+        arcade.draw_text("• 75% — новая плитка со значением 2", WINDOW_WIDTH / 2, y_pos,
+                         (14, 33, 75), 28, anchor_x="center", font_name=self.comic_font)
+        arcade.draw_text("• 25% — новая плитка со значением 4", WINDOW_WIDTH / 2, y_pos - 80,
+                         (14, 33, 75), 28, anchor_x="center", font_name=self.comic_font)
+
+        arcade.draw_text("Нажмите ESC или кнопку 'Назад'", 230, 50,
+                         (14, 33, 75), 20, anchor_x="center", font_name=self.comic_font)
+
+
+
+    def on_show_view(self):
+        self.manager.enable()
+        arcade.set_background_color(205, 193, 180)
+
+    def on_hide_view(self):
+        self.manager.disable()
+
+    def on_key_press(self, key, modifiers):
+        if key == arcade.key.ESCAPE:
+            self.window.show_view(MenuView())
+
+
+window = arcade.Window(WINDOW_WIDTH, WINDOW_HEIGHT, "2048 - Меню")
+menu_view = MenuView()
+window.show_view(menu_view)
+arcade.run()
